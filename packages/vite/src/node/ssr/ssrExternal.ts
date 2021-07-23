@@ -1,8 +1,9 @@
 import fs from 'fs'
 import path from 'path'
 import { tryNodeResolve, InternalResolveOptions } from '../plugins/resolve'
-import { lookupFile, resolveFrom } from '../utils'
+import { isDefined, lookupFile, resolveFrom, unique } from '../utils'
 import { ResolvedConfig } from '..'
+import { createFilter } from '@rollup/pluginutils'
 
 /**
  * Heuristics for determining whether a dependency should be externalized for
@@ -24,7 +25,8 @@ export function resolveSSRExternal(
   }
   const pkg = JSON.parse(pkgContent)
   const devDeps = Object.keys(pkg.devDependencies || {})
-  const deps = [...knownImports, ...Object.keys(pkg.dependencies || {})]
+  const importedDeps = knownImports.map(getNpmPackageName).filter(isDefined)
+  const deps = unique([...importedDeps, ...Object.keys(pkg.dependencies || {})])
 
   for (const id of devDeps) {
     ssrExternals.add(id)
@@ -45,10 +47,17 @@ export function resolveSSRExternal(
     }
     seen.add(id)
 
-    let entry
-    let requireEntry
+    let entry: string | undefined
+    let requireEntry: string
     try {
-      entry = tryNodeResolve(id, undefined, resolveOptions, true)?.id
+      entry = tryNodeResolve(
+        id,
+        undefined,
+        resolveOptions,
+        true,
+        undefined,
+        true
+      )?.id
       requireEntry = require.resolve(id, { paths: [root] })
     } catch (e) {
       // resolve failed, assume include
@@ -100,7 +109,10 @@ export function resolveSSRExternal(
   }
   let externals = [...ssrExternals]
   if (config.ssr?.noExternal) {
-    externals = externals.filter((id) => !config.ssr!.noExternal!.includes(id))
+    const filter = createFilter(undefined, config.ssr.noExternal, {
+      resolve: false
+    })
+    externals = externals.filter((id) => filter(id))
   }
   return externals.filter((id) => id !== 'vite')
 }
@@ -120,4 +132,14 @@ export function shouldExternalizeForSSR(
     }
   })
   return should
+}
+
+function getNpmPackageName(importPath: string): string | null {
+  const parts = importPath.split('/')
+  if (parts[0].startsWith('@')) {
+    if (!parts[1]) return null
+    return `${parts[0]}/${parts[1]}`
+  } else {
+    return parts[0]
+  }
 }

@@ -1,6 +1,6 @@
 # @vitejs/plugin-legacy [![npm](https://img.shields.io/npm/v/@vitejs/plugin-legacy.svg)](https://npmjs.com/package/@vitejs/plugin-legacy)
 
-**Note: this plugin requires `vite@^2.0.0-beta.12`**.
+**Note: this plugin requires `vite@^2.0.0`**.
 
 Vite's default browser support baseline is [Native ESM](https://caniuse.com/es6-module). This plugin provides support for legacy browsers that do not support native ESM.
 
@@ -12,7 +12,7 @@ By default, this plugin will:
 
 - Inject `<script nomodule>` tags into generated HTML to conditionally load the polyfills and legacy bundle only in browsers without native ESM support.
 
-- Inject the `import.meta.env.LEGACY` env variable, which will only be `true` in the legacy production build, and `false` in all other cases. (requires `vite@^2.0.0-beta.69`)
+- Inject the `import.meta.env.LEGACY` env variable, which will only be `true` in the legacy production build, and `false` in all other cases.
 
 ## Usage
 
@@ -24,6 +24,22 @@ export default {
   plugins: [
     legacy({
       targets: ['defaults', 'not IE 11']
+    })
+  ]
+}
+```
+
+When targeting IE11, you also need `regenerator-runtime`:
+
+```js
+// vite.config.js
+import legacy from '@vitejs/plugin-legacy'
+
+export default {
+  plugins: [
+    legacy({
+      targets: ['ie >= 11'],
+      additionalLegacyPolyfills: ['regenerator-runtime/runtime']
     })
   ]
 }
@@ -57,7 +73,7 @@ export default {
 
   Add custom imports to the legacy polyfills chunk. Since the usage-based polyfill detection only covers ES language features, it may be necessary to manually specify additional DOM API polyfills using this option.
 
-  Note: if additional plyfills are needed for both the modern and legacy chunks, they can simply be imported in the application source code.
+  Note: if additional polyfills are needed for both the modern and legacy chunks, they can simply be imported in the application source code.
 
 ### `ignoreBrowserslistConfig`
 
@@ -106,6 +122,13 @@ export default {
   }
   ```
 
+## Dynamic Import
+
+The legacy plugin offers a way to use native `import()` in the modern build while falling back to the legacy build in browsers with native ESM but without dynamic import support (e.g. Legacy Edge). This feature works by injecting a runtime check and loading the legacy bundle with SystemJs runtime if needed. There are the following drawbacks:
+
+- Modern bundle is downloaded in all ESM browsers
+- Modern bundle throws `SyntaxError` in browsers without dynamic import
+
 ## Polyfill Specifiers
 
 Polyfill specifier strings for `polyfills` and `modernPolyfills` can be either of the following:
@@ -131,12 +154,13 @@ export default {
 
 ## Content Security Policy
 
-The legacy plugin requires inline scripts for [Safari 10.1 `nomodule` fix](https://gist.github.com/samthor/64b114e4a4f539915a95b91ffd340acc) and SystemJS initialization. If you have a strict CSP policy requirement, you will need to [add the corresponding hashes to your `script-src` list](https://developer.mozilla.org/en-US/docs/Web/HTTP/Headers/Content-Security-Policy/script-src#unsafe_inline_script):
+The legacy plugin requires inline scripts for [Safari 10.1 `nomodule` fix](https://gist.github.com/samthor/64b114e4a4f539915a95b91ffd340acc), SystemJS initialization, and dynamic import fallback. If you have a strict CSP policy requirement, you will need to [add the corresponding hashes to your `script-src` list](https://developer.mozilla.org/en-US/docs/Web/HTTP/Headers/Content-Security-Policy/script-src#unsafe_inline_script):
 
 - `MS6/3FCg4WjP9gwgaBGwLpRCY6fZBgwmhVCdrPrNf3E=`
 - `tQjf8gvb2ROOMapIxFvFAYBeUJ0v1HCbOcSmDNXGtDo=`
+- `T9h4ixy0FtNsCwAyTfBtIY6uV5ZhMeNQIlL42GAKEME=`
 
-These values can also be retrived via
+These values can also be retrieved via
 
 ```js
 const { cspHashes } = require('@vitejs/plugin-legacy')

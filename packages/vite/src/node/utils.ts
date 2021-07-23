@@ -76,7 +76,7 @@ export function createDebugger(
   }
 }
 
-const isWindows = os.platform() === 'win32'
+export const isWindows = os.platform() === 'win32'
 const VOLUME_RE = /^[A-Z]:/i
 
 export function normalizePath(id: string): string {
@@ -94,8 +94,8 @@ export function ensureVolumeInPath(file: string): string {
   return isWindows ? path.resolve(file) : file
 }
 
-export const queryRE = /\?.*$/
-export const hashRE = /#.*$/
+export const queryRE = /\?.*$/s
+export const hashRE = /#.*$/s
 
 export const cleanUrl = (url: string): string =>
   url.replace(hashRE, '').replace(queryRE, '')
@@ -106,19 +106,19 @@ export const isExternalUrl = (url: string): boolean => externalRE.test(url)
 export const dataUrlRE = /^\s*data:/i
 export const isDataUrl = (url: string): boolean => dataUrlRE.test(url)
 
-const knownJsSrcRE = /\.((j|t)sx?|mjs|vue|marko)($|\?)/
+const knownJsSrcRE = /\.((j|t)sx?|mjs|vue|marko|svelte)($|\?)/
 export const isJSRequest = (url: string): boolean => {
+  url = cleanUrl(url)
   if (knownJsSrcRE.test(url)) {
     return true
   }
-  url = cleanUrl(url)
   if (!path.extname(url) && !url.endsWith('/')) {
     return true
   }
   return false
 }
 
-const importQueryRE = /(\?|&)import(?:&|$)/
+const importQueryRE = /(\?|&)import=?(?:&|$)/
 const trailingSeparatorRE = /[\?&]$/
 export const isImportRequest = (url: string): boolean => importQueryRE.test(url)
 
@@ -203,6 +203,10 @@ export function prettifyUrl(url: string, root: string): string {
 
 export function isObject(value: unknown): value is Record<string, any> {
   return Object.prototype.toString.call(value) === '[object Object]'
+}
+
+export function isDefined<T>(value: T | undefined | null): value is T {
+  return value != null
 }
 
 export function lookupFile(
@@ -323,11 +327,15 @@ export function writeFile(
   fs.writeFileSync(filename, content)
 }
 
-export function emptyDir(dir: string): void {
-  if (!fs.existsSync(dir)) {
-    return
-  }
+/**
+ * Delete every file and subdirectory. **The given directory must exist.**
+ * Pass an optional `skip` array to preserve files in the root directory.
+ */
+export function emptyDir(dir: string, skip?: string[]): void {
   for (const file of fs.readdirSync(dir)) {
+    if (skip?.includes(file)) {
+      continue
+    }
     const abs = path.resolve(dir, file)
     // baseline is Node 12 so can't use rmSync :(
     if (fs.lstatSync(abs).isDirectory()) {
@@ -343,6 +351,9 @@ export function copyDir(srcDir: string, destDir: string): void {
   fs.mkdirSync(destDir, { recursive: true })
   for (const file of fs.readdirSync(srcDir)) {
     const srcFile = path.resolve(srcDir, file)
+    if (srcFile === destDir) {
+      continue
+    }
     const destFile = path.resolve(destDir, file)
     const stat = fs.statSync(srcFile)
     if (stat.isDirectory()) {
@@ -351,6 +362,10 @@ export function copyDir(srcDir: string, destDir: string): void {
       fs.copyFileSync(srcFile, destFile)
     }
   }
+}
+
+export function ensureLeadingSlash(path: string): string {
+  return !path.startsWith('/') ? '/' + path : path
 }
 
 export function ensureWatchedFile(
@@ -427,7 +442,8 @@ export function combineSourcemaps(
     return { ...nullSourceMap }
   }
 
-  let map
+  // We don't declare type here so we can convert/fake/map as RawSourceMap
+  let map //: SourceMap
   let mapIndex = 1
   const useArrayInterface =
     sourcemapList.slice(0, -1).find((m) => m.sources.length !== 1) === undefined
@@ -451,4 +467,45 @@ export function combineSourcemaps(
   }
 
   return map as RawSourceMap
+}
+
+export function unique<T>(arr: T[]): T[] {
+  return Array.from(new Set(arr))
+}
+
+export interface Hostname {
+  // undefined sets the default behaviour of server.listen
+  host: string | undefined
+  // resolve to localhost when possible
+  name: string
+}
+
+export function resolveHostname(
+  optionsHost: string | boolean | undefined
+): Hostname {
+  let host: string | undefined
+  if (
+    optionsHost === undefined ||
+    optionsHost === false ||
+    optionsHost === 'localhost'
+  ) {
+    // Use a secure default
+    host = '127.0.0.1'
+  } else if (optionsHost === true) {
+    // If passed --host in the CLI without arguments
+    host = undefined // undefined typically means 0.0.0.0 or :: (listen on all IPs)
+  } else {
+    host = optionsHost
+  }
+
+  // Set host name to localhost when possible, unless the user explicitly asked for '127.0.0.1'
+  const name =
+    (optionsHost !== '127.0.0.1' && host === '127.0.0.1') ||
+    host === '0.0.0.0' ||
+    host === '::' ||
+    host === undefined
+      ? 'localhost'
+      : host
+
+  return { host, name }
 }
