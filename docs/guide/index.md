@@ -1,94 +1,196 @@
 # Getting Started
 
+<audio id="vite-audio">
+  <source src="/vite.mp3" type="audio/mpeg">
+</audio>
+
 ## Overview
 
-Vite (French word for "fast", pronounced `/vit/`) is a build tool that aims to provide a faster and leaner development experience for modern web projects. It consists of two major parts:
+Vite (French word for "quick", pronounced `/viːt/`<button style="border:none;padding:3px;border-radius:4px;vertical-align:bottom" id="play-vite-audio" aria-label="pronounce" onclick="document.getElementById('vite-audio').play();"><svg style="height:2em;width:2em"><use href="../images/voice.svg?no-inline#voice" /></svg></button>, like "veet") is a build tool that aims to provide a faster and leaner development experience for modern web projects. It consists of two major parts:
 
 - A dev server that provides [rich feature enhancements](./features) over [native ES modules](https://developer.mozilla.org/en-US/docs/Web/JavaScript/Guide/Modules), for example extremely fast [Hot Module Replacement (HMR)](./features#hot-module-replacement).
 
-- A build command that bundles your code with [Rollup](https://rollupjs.org), pre-configured to output highly optimized static assets for production.
+- A build command that bundles your code with [Rolldown](https://rolldown.rs), pre-configured to output highly optimized static assets for production.
 
-Vite is opinionated and comes with sensible defaults out of the box, but is also highly extensible via its [Plugin API](./api-plugin) and [JavaScript API](./api-javascript) with full typing support.
+Vite is opinionated and comes with sensible defaults out of the box. Read about what's possible in the [Features Guide](./features). Support for frameworks or integration with other tools is possible through [Plugins](./using-plugins). The [Config Section](../config/) explains how to adapt Vite to your project if needed.
+
+Vite is also highly extensible via its [Plugin API](./api-plugin) and [JavaScript API](./api-javascript) with full typing support.
 
 You can learn more about the rationale behind the project in the [Why Vite](./why) section.
 
+<ScrimbaLink href="https://scrimba.com/intro-to-vite-c03p6pbbdq?via=vite" title="Free Vite Course on Scrimba">Learn Vite through interactive tutorials on Scrimba</ScrimbaLink>
+
 ## Browser Support
 
-- The default build targets browsers that support both [native ESM via script tags](https://caniuse.com/es6-module) and [native ESM dynamic import](https://caniuse.com/es6-module-dynamic-import). Legacy browsers can be supported via the official [@vitejs/plugin-legacy](https://github.com/vitejs/vite/tree/main/packages/plugin-legacy) - see the [Building for Production](./build) section for more details.
+During development, Vite assumes that a modern browser is used. This means the browser supports most of the latest JavaScript and CSS features. For that reason, Vite sets [`esnext` as the transform target](https://oxc.rs/docs/guide/usage/transformer/lowering.html#target). This prevents syntax lowering, letting Vite serve modules as close as possible to the original source code. Vite injects some runtime code to make the development server work. This code uses features included in [Baseline](https://web-platform-dx.github.io/baseline/) Newly Available at the time of each major release (2026-01-01 for this major).
+
+For production builds, Vite by default targets [Baseline](https://web-platform-dx.github.io/baseline/) Widely Available browser versions as of a date fixed for each major release. For this major, that corresponds to [browser versions released around mid-2023](https://web-platform-dx.github.io/supported-browsers/?widelyAvailableOnDate=2026-01-01). The target can be lowered via configuration. Additionally, legacy browsers can be supported via the official [@vitejs/plugin-legacy](https://github.com/vitejs/vite/tree/main/packages/plugin-legacy). See the [Building for Production](./build) section for more details.
+
+## Trying Vite Online
+
+You can try Vite online on [StackBlitz](https://vite.new/). It runs the Vite-based build setup directly in the browser, so it is almost identical to the local setup but doesn't require installing anything on your machine. You can navigate to `vite.new/{template}` to select which framework to use.
+
+The supported template presets are:
+
+|             JavaScript              |                TypeScript                 |
+| :---------------------------------: | :---------------------------------------: |
+| [vanilla](https://vite.new/vanilla) | [vanilla-ts](https://vite.new/vanilla-ts) |
+|     [vue](https://vite.new/vue)     |     [vue-ts](https://vite.new/vue-ts)     |
+|   [react](https://vite.new/react)   |   [react-ts](https://vite.new/react-ts)   |
+|  [preact](https://vite.new/preact)  |  [preact-ts](https://vite.new/preact-ts)  |
+|     [lit](https://vite.new/lit)     |     [lit-ts](https://vite.new/lit-ts)     |
+|  [svelte](https://vite.new/svelte)  |  [svelte-ts](https://vite.new/svelte-ts)  |
+|   [solid](https://vite.new/solid)   |   [solid-ts](https://vite.new/solid-ts)   |
+|    [qwik](https://vite.new/qwik)    |    [qwik-ts](https://vite.new/qwik-ts)    |
 
 ## Scaffolding Your First Vite Project
 
-::: tip Compatibility Note
-Vite requires [Node.js](https://nodejs.org/en/) version >=12.0.0.
-:::
+::: code-group
 
-With NPM:
-
-```bash
-$ npm init vite@latest
+```bash [npm]
+$ npm create vite@latest
 ```
 
-With Yarn:
-
-```bash
+```bash [Yarn]
 $ yarn create vite
 ```
 
-With PNPM:
-
-```bash
-$ pnpx create-vite
+```bash [pnpm]
+$ pnpm create vite
 ```
+
+```bash [Bun]
+$ bun create vite
+```
+
+```bash [Deno]
+$ deno init --npm vite
+```
+
+:::
 
 Then follow the prompts!
 
+<ScrimbaLink href="https://scrimba.com/intro-to-vite-c03p6pbbdq/~0yhj?via=vite" title="Scaffolding Your First Vite Project">Watch an interactive lesson on Scrimba</ScrimbaLink>
+
+::: tip Compatibility Note
+Vite requires [Node.js](https://nodejs.org/en/) version 20.19+, 22.12+. However, some templates require a higher Node.js version to work, please upgrade if your package manager warns about it.
+:::
+
+:::: details Using create vite with command line options
+
 You can also directly specify the project name and the template you want to use via additional command line options. For example, to scaffold a Vite + Vue project, run:
 
-```bash
-# npm 6.x
-npm init vite@latest my-vue-app --template vue
+::: code-group
 
+```bash [npm]
 # npm 7+, extra double-dash is needed:
-npm init vite@latest my-vue-app -- --template vue
-
-# yarn
-yarn create vite my-vue-app --template vue
+$ npm create vite@latest my-vue-app -- --template vue
 ```
 
-Supported template presets include:
+```bash [Yarn]
+$ yarn create vite my-vue-app --template vue
+```
 
-- `vanilla`
-- `vanilla-ts`
-- `vue`
-- `vue-ts`
-- `react`
-- `react-ts`
-- `preact`
-- `preact-ts`
-- `lit-element`
-- `lit-element-ts`
-- `svelte`
-- `svelte-ts`
+```bash [pnpm]
+$ pnpm create vite my-vue-app --template vue
+```
 
-See [create-vite](https://github.com/vitejs/vite/tree/main/packages/create-vite) for more details on each template.
+```bash [Bun]
+$ bun create vite my-vue-app --template vue
+```
+
+```bash [Deno]
+$ deno init --npm vite my-vue-app --template vue
+```
+
+:::
+
+See [create-vite](https://github.com/vitejs/vite/tree/main/packages/create-vite) for more details on each supported template: `vanilla`, `vanilla-ts`, `vue`, `vue-ts`, `react`, `react-compiler`, `react-ts`, `react-compiler-ts`, `preact`, `preact-ts`, `lit`, `lit-ts`, `svelte`, `svelte-ts`, `solid`, `solid-ts`, `qwik`, `qwik-ts`.
+
+You can use `.` for the project name to scaffold in the current directory.
+
+To create a project without interactive prompts, you can use the `--no-interactive` flag.
+
+::::
 
 ## Community Templates
 
-create-vite is a tool to quickly start a project from a basic template for popular frameworks. Check out Awesome Vite for [community maintained templates](https://github.com/vitejs/awesome-vite#templates) that include other tools or target different frameworks. You can use a tool like [degit](https://github.com/Rich-Harris/degit) to scaffold your project with one of the templates.
+create-vite is a tool to quickly start a project from a basic template for popular frameworks. Check out Awesome Vite for [community maintained templates](https://github.com/vitejs/awesome-vite#templates) that include other tools or target different frameworks.
+
+For a template at `https://github.com/user/project`, you can try it out online using `https://github.stackblitz.com/user/project` (adding `.stackblitz` after `github` to the URL of the project).
+
+You can also use a tool like [tiged](https://github.com/tiged/tiged) to scaffold your project with one of the templates. Assuming the project is on GitHub and uses `main` as the default branch, you can create a local copy using:
 
 ```bash
-npx degit user/project my-project
+npx tiged user/project my-project
 cd my-project
 
 npm install
 npm run dev
 ```
 
-If the project uses `main` as the default branch, suffix the project repo with `#main`
+## Manual Installation
 
-```bash
-npx degit user/project#main my-project
+In your project, you can install the `vite` CLI using:
+
+::: code-group
+
+```bash [npm]
+$ npm install -D vite
 ```
+
+```bash [Yarn]
+$ yarn add -D vite
+```
+
+```bash [pnpm]
+$ pnpm add -D vite
+```
+
+```bash [Bun]
+$ bun add -D vite
+```
+
+```bash [Deno]
+$ deno add -D npm:vite
+```
+
+:::
+
+And create an `index.html` file like this:
+
+```html
+<p>Hello Vite!</p>
+```
+
+Then run the appropriate CLI command in your terminal:
+
+::: code-group
+
+```bash [npm]
+$ npx vite
+```
+
+```bash [Yarn]
+$ yarn vite
+```
+
+```bash [pnpm]
+$ pnpm vite
+```
+
+```bash [Bun]
+$ bunx vite
+```
+
+```bash [Deno]
+$ deno run -A npm:vite
+```
+
+:::
+
+The `index.html` will be served on `http://localhost:5173`.
 
 ## `index.html` and Project Root
 
@@ -103,38 +205,72 @@ Vite also supports [multi-page apps](./build#multi-page-app) with multiple `.htm
 #### Specifying Alternative Root
 
 Running `vite` starts the dev server using the current working directory as root. You can specify an alternative root with `vite serve some/sub/dir`.
+Note that Vite will also resolve [its config file (i.e. `vite.config.js`)](/config/#configuring-vite) inside the project root, so you'll need to move it if the root is changed.
 
 ## Command Line Interface
 
-In a project where Vite is installed, you can use the `vite` binary in your npm scripts, or run it directly with `npx vite`. Here is the default npm scripts in a scaffolded Vite project:
+In a project where Vite is installed, you can use the `vite` binary in your npm scripts, or run it directly with `npx vite`. Here are the default npm scripts in a scaffolded Vite project:
 
-```json
+<!-- prettier-ignore -->
+```json [package.json]
 {
   "scripts": {
-    "dev": "vite", // start dev server
+    "dev": "vite", // start dev server, aliases: `vite dev`, `vite serve`
     "build": "vite build", // build for production
-    "serve": "vite preview" // locally preview production build
+    "preview": "vite preview" // locally preview production build
   }
 }
 ```
 
-You can specify additional CLI options like `--port` or `--https`. For a full list of CLI options, run `npx vite --help` in your project.
+You can specify additional CLI options like `--port` or `--open`. For a full list of CLI options, run `npx vite --help` in your project.
+
+Learn more about the [Command Line Interface](./cli.md).
 
 ## Using Unreleased Commits
 
-If you can't wait for a new release to test the latest features, you will need to clone the [vite repo](https://github.com/vitejs/vite) to your local machine and then build and link it yourself ([Yarn 1.x](https://classic.yarnpkg.com/lang/en/) is required):
+If you can't wait for a new release to test the latest features, you can install a specific commit of Vite with https://pkg.pr.new:
+
+::: code-group
+
+```bash [npm]
+$ npm install -D https://pkg.pr.new/vite@SHA
+```
+
+```bash [Yarn]
+$ yarn add -D https://pkg.pr.new/vite@SHA
+```
+
+```bash [pnpm]
+$ pnpm add -D https://pkg.pr.new/vite@SHA
+```
+
+```bash [Bun]
+$ bun add -D https://pkg.pr.new/vite@SHA
+```
+
+:::
+
+Replace `SHA` with any of [Vite's commit SHAs](https://github.com/vitejs/vite/commits/main/). Note that only commits within the last month will work, as older commit releases are purged.
+
+Alternatively, you can also clone the [vite repo](https://github.com/vitejs/vite) to your local machine and then build and link it yourself ([pnpm](https://pnpm.io/) is required):
 
 ```bash
 git clone https://github.com/vitejs/vite.git
 cd vite
-yarn
+pnpm install
 cd packages/vite
-yarn build
-yarn link
+pnpm run build
+pnpm link # use your preferred package manager for this step
 ```
 
-Then go to your vite based project and run `yarn link vite`. Now restart the development server (`yarn dev`) to ride on the bleeding edge!
+Then go to your Vite based project and run `pnpm link vite` (or the package manager that you used to link `vite` globally). Now restart the development server to ride on the bleeding edge!
+
+To learn more about how and when Vite does releases, check out the [Releases](../releases.md) documentation.
+
+::: tip Dependencies using Vite
+To replace the Vite version used by dependencies transitively, you should use [npm overrides](https://docs.npmjs.com/cli/v11/configuring-npm/package-json#overrides) or [pnpm overrides](https://pnpm.io/settings#overrides).
+:::
 
 ## Community
 
-If you have questions or need help, reach out to the community at [Discord](https://discord.gg/4cmKdMfpU5) and [GitHub Discussions](https://github.com/vitejs/vite/discussions).
+If you have questions or need help, reach out to the community at [Discord](https://chat.vite.dev) and [GitHub Discussions](https://github.com/vitejs/vite/discussions).

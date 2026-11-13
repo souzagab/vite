@@ -1,131 +1,270 @@
-import fs from 'fs'
-import path from 'path'
-import chalk from 'chalk'
-import { Plugin } from '../plugin'
+import path from 'node:path'
+import type { RawSourceMap } from '@jridgewell/remapping'
+import colors from 'picocolors'
+import type { InternalModuleFormat, SourceMap } from 'rolldown'
+import { resolveTsconfig } from 'rolldown/experimental'
+import { TsconfigCache } from 'rolldown/utils'
+import type { FSWatcher } from '#dep-types/chokidar'
+import type {
+  EsbuildLoader,
+  EsbuildMessage,
+  EsbuildTransformOptions,
+  EsbuildTransformResult as RawEsbuildTransformResult,
+} from '#types/internal/esbuildOptions'
+import { cleanUrl } from '../../shared/utils'
+import type { ResolvedConfig } from '../config'
+import type { Plugin } from '../plugin'
+import type { ViteDevServer } from '../server'
 import {
-  transform,
-  Message,
-  Loader,
-  TransformOptions,
-  TransformResult
-} from 'esbuild'
-import { cleanUrl, createDebugger, generateCodeFrame } from '../utils'
-import { RawSourceMap } from '@ampproject/remapping/dist/types/types'
-import { SourceMap } from 'rollup'
-import { ResolvedConfig } from '..'
-import { createFilter } from '@rollup/pluginutils'
-import { combineSourcemaps } from '../utils'
-import stripBom from 'strip-bom'
-import stripComments from 'strip-json-comments'
-import { createRequire } from 'module'
+  combineSourcemaps,
+  createDebugger,
+  ensureWatchedFile,
+  generateCodeFrame,
+} from '../utils'
 
 const debug = createDebugger('vite:esbuild')
 
-export interface ESBuildOptions extends TransformOptions {
-  include?: string | RegExp | string[] | RegExp[]
-  exclude?: string | RegExp | string[] | RegExp[]
-  jsxInject?: string
+// IIFE content looks like `var MyLib = function() {`.
+// Spaces are removed and parameters are mangled when minified
+const IIFE_BEGIN_RE =
+  /(?:const|var)\s+\S+\s*=\s*\(?function\([^()]*\)\s*\{\s*"use strict";/
+
+const validExtensionRE = /\.\w+$/
+
+// the final build should always support dynamic import and import.meta.
+// if they need to be polyfilled, plugin-legacy should be used.
+// plugin-legacy detects these two features when checking for modern code.
+// Browser support: https://caniuse.com/es6-module-dynamic-import,mdn-javascript_operators_import_meta#:~:text=Feature%20summary
+export const defaultEsbuildSupported = {
+  'dynamic-import': true,
+  'import-meta': true,
 }
 
-export type ESBuildTransformResult = Omit<TransformResult, 'map'> & {
+export interface ESBuildOptions extends EsbuildTransformOptions {
+  include?: string | RegExp | ReadonlyArray<string | RegExp>
+  exclude?: string | RegExp | ReadonlyArray<string | RegExp>
+  jsxInject?: string
+  /**
+   * This option is not respected. Use `build.minify` instead.
+   */
+  minify?: never
+}
+
+export type ESBuildTransformResult = Omit<RawEsbuildTransformResult, 'map'> & {
   map: SourceMap
 }
 
 type TSConfigJSON = {
   extends?: string
   compilerOptions?: {
-    target?: string
+    alwaysStrict?: boolean
+    experimentalDecorators?: boolean
+    importsNotUsedAsValues?: 'remove' | 'preserve' | 'error'
+    jsx?: 'preserve' | 'react' | 'react-jsx' | 'react-jsxdev'
     jsxFactory?: string
     jsxFragmentFactory?: string
+    jsxImportSource?: string
+    preserveValueImports?: boolean
+    target?: string
     useDefineForClassFields?: boolean
-    importsNotUsedAsValues?: 'remove' | 'preserve' | 'error'
+    emitDecoratorMetadata?: boolean
+    verbatimModuleSyntax?: boolean
   }
   [key: string]: any
 }
-type TSCompilerOptions = NonNullable<TSConfigJSON['compilerOptions']>
+export type TSCompilerOptions = NonNullable<TSConfigJSON['compilerOptions']>
+
+let esbuild: Promise<typeof import('esbuild')> | undefined
+const importEsbuild = () => {
+  esbuild ||= import('esbuild')
+  return esbuild
+}
+
+let warnedTransformWithEsbuild = false
+const warnTransformWithEsbuildUsageOnce = () => {
+  if (warnedTransformWithEsbuild) return
+  warnedTransformWithEsbuild = true
+
+  // eslint-disable-next-line no-console -- logger cannot be used here
+  console.warn(
+    colors.yellow(
+      '`transformWithEsbuild` is deprecated and will be removed in the future. ' +
+        'Please migrate to `transformWithOxc`.',
+    ),
+  )
+}
 
 export async function transformWithEsbuild(
   code: string,
   filename: string,
-  options?: TransformOptions,
-  inMap?: object
+  options?: EsbuildTransformOptions,
+  inMap?: object,
+  config?: ResolvedConfig,
+  watcher?: FSWatcher,
+  /** @internal */
+  ignoreEsbuildWarning = false,
 ): Promise<ESBuildTransformResult> {
-  // if the id ends with a valid ext, use it (e.g. vue blocks)
-  // otherwise, cleanup the query before checking the ext
-  const ext = path.extname(
-    /\.\w+$/.test(filename) ? filename : cleanUrl(filename)
-  )
+  let loader = options?.loader
 
-  let loader = ext.slice(1)
-  if (loader === 'cjs' || loader === 'mjs') {
-    loader = 'js'
+  if (!loader) {
+    // if the id ends with a valid ext, use it (e.g. vue blocks)
+    // otherwise, cleanup the query before checking the ext
+    const ext = path
+      .extname(validExtensionRE.test(filename) ? filename : cleanUrl(filename))
+      .slice(1)
+
+    if (ext === 'cjs' || ext === 'mjs') {
+      loader = 'js'
+    } else if (ext === 'cts' || ext === 'mts') {
+      loader = 'ts'
+    } else {
+      loader = ext as EsbuildLoader
+    }
   }
 
-  // these fields would affect the compilation result
-  // https://esbuild.github.io/content-types/#tsconfig-json
-  const meaningfulFields: Array<keyof TSCompilerOptions> = [
-    'jsxFactory',
-    'jsxFragmentFactory',
-    'useDefineForClassFields',
-    'importsNotUsedAsValues'
-  ]
-  const compilerOptionsForFile: TSCompilerOptions = {}
-  if (loader === 'ts' || loader === 'tsx') {
-    const loadedTsconfig = await loadTsconfigJsonForFile(filename)
-    const loadedCompilerOptions = loadedTsconfig.compilerOptions ?? {}
+  let tsconfigRaw = options?.tsconfigRaw
 
-    for (const field of meaningfulFields) {
-      if (field in loadedCompilerOptions) {
-        // @ts-ignore TypeScript can't tell they are of the same type
-        compilerOptionsForFile[field] = loadedCompilerOptions[field]
+  // if options provide tsconfigRaw in string, it takes highest precedence
+  if (typeof tsconfigRaw !== 'string') {
+    // these fields would affect the compilation result
+    // https://esbuild.github.io/content-types/#tsconfig-json
+    const meaningfulFields: Array<keyof TSCompilerOptions> = [
+      'alwaysStrict',
+      'experimentalDecorators',
+      'importsNotUsedAsValues',
+      'jsx',
+      'jsxFactory',
+      'jsxFragmentFactory',
+      'jsxImportSource',
+      'preserveValueImports',
+      'target',
+      'useDefineForClassFields',
+      'verbatimModuleSyntax',
+    ]
+    const compilerOptionsForFile: TSCompilerOptions = {}
+    if (loader === 'ts' || loader === 'tsx') {
+      const result = resolveTsconfig(
+        filename,
+        getTSConfigResolutionCache(config),
+      )
+      if (result) {
+        const { tsconfig: loadedTsconfig, tsconfigFilePaths } = result
+        // tsconfig could be out of root, make sure it is watched on dev
+        if (watcher && config) {
+          for (const tsconfigFile of tsconfigFilePaths) {
+            ensureWatchedFile(watcher, tsconfigFile, config.root)
+          }
+        }
+
+        const loadedCompilerOptions = loadedTsconfig.compilerOptions ?? {}
+
+        for (const field of meaningfulFields) {
+          if (field in loadedCompilerOptions) {
+            // @ts-expect-error TypeScript can't tell they are of the same type
+            compilerOptionsForFile[field] = loadedCompilerOptions[field]
+          }
+        }
       }
     }
 
-    // align with TypeScript 4.3
-    // https://github.com/microsoft/TypeScript/pull/42663
-    if (loadedCompilerOptions.target?.toLowerCase() === 'esnext') {
-      compilerOptionsForFile.useDefineForClassFields =
-        loadedCompilerOptions.useDefineForClassFields ?? true
+    const compilerOptions = {
+      ...compilerOptionsForFile,
+      ...tsconfigRaw?.compilerOptions,
+    }
+
+    // esbuild uses `useDefineForClassFields: true` when `tsconfig.compilerOptions.target` isn't declared
+    // but we want `useDefineForClassFields: false` when `tsconfig.compilerOptions.target` isn't declared
+    // to align with the TypeScript's behavior
+    if (
+      compilerOptions.useDefineForClassFields === undefined &&
+      compilerOptions.target === undefined
+    ) {
+      compilerOptions.useDefineForClassFields = false
+    }
+
+    // esbuild uses tsconfig fields when both the normal options and tsconfig was set
+    // but we want to prioritize the normal options
+    if (options) {
+      if (options.jsx) compilerOptions.jsx = undefined
+      if (options.jsxFactory) compilerOptions.jsxFactory = undefined
+      if (options.jsxFragment) compilerOptions.jsxFragmentFactory = undefined
+      if (options.jsxImportSource) compilerOptions.jsxImportSource = undefined
+    }
+
+    tsconfigRaw = {
+      ...tsconfigRaw,
+      compilerOptions,
     }
   }
 
-  const resolvedOptions = {
-    loader: loader as Loader,
+  const resolvedOptions: EsbuildTransformOptions = {
     sourcemap: true,
     // ensure source file name contains full query
     sourcefile: filename,
-    tsconfigRaw: { compilerOptions: compilerOptionsForFile },
-    ...options
-  } as ESBuildOptions
+    ...options,
+    loader,
+    tsconfigRaw,
+  }
 
+  // Some projects in the ecosystem are calling this function with an ESBuildOptions
+  // object and esbuild throws an error for extra fields
+  // @ts-expect-error include exists in ESBuildOptions
   delete resolvedOptions.include
+  // @ts-expect-error exclude exists in ESBuildOptions
   delete resolvedOptions.exclude
+  // @ts-expect-error jsxInject exists in ESBuildOptions
   delete resolvedOptions.jsxInject
+
+  let transform: typeof import('esbuild').transform
+  try {
+    transform = (await importEsbuild()).transform
+  } catch (e) {
+    throw new Error(
+      'Failed to load `transformWithEsbuild`. ' +
+        'It is deprecated and it now requires esbuild to be installed separately. ' +
+        'If you are a package author, please migrate to `transformWithOxc` instead.',
+      { cause: e },
+    )
+  }
+
+  if (!ignoreEsbuildWarning) {
+    warnTransformWithEsbuildUsageOnce()
+  }
 
   try {
     const result = await transform(code, resolvedOptions)
-    if (inMap) {
+    let map: SourceMap
+    if (inMap && resolvedOptions.sourcemap) {
       const nextMap = JSON.parse(result.map)
       nextMap.sourcesContent = []
-      return {
-        ...result,
-        map: combineSourcemaps(filename, [
-          nextMap as RawSourceMap,
-          inMap as RawSourceMap
-        ]) as SourceMap
-      }
+      map = combineSourcemaps(filename, [
+        nextMap as RawSourceMap,
+        inMap as RawSourceMap,
+      ]) as SourceMap
     } else {
-      return {
-        ...result,
-        map: JSON.parse(result.map)
-      }
+      map =
+        resolvedOptions.sourcemap && resolvedOptions.sourcemap !== 'inline'
+          ? JSON.parse(result.map)
+          : { mappings: '' }
     }
-  } catch (e) {
-    debug(`esbuild error with options used: `, resolvedOptions)
+    return {
+      ...result,
+      map,
+    }
+  } catch (e: any) {
+    debug?.(`esbuild error with options used: `, resolvedOptions)
     // patch error information
     if (e.errors) {
       e.frame = ''
-      e.errors.forEach((m: Message) => {
+      e.errors.forEach((m: EsbuildMessage) => {
+        if (
+          m.text === 'Experimental decorators are not currently enabled' ||
+          m.text ===
+            'Parameter decorators only work when experimental decorators are enabled'
+        ) {
+          m.text +=
+            '. Vite 5 now uses esbuild 0.18 and you need to enable them by adding "experimentalDecorators": true in your "tsconfig.json" file.'
+        }
         e.frame += `\n` + prettifyMessage(m, code)
       })
       e.loc = e.errors[0].location
@@ -134,258 +273,238 @@ export async function transformWithEsbuild(
   }
 }
 
-export function esbuildPlugin(options: ESBuildOptions = {}): Plugin {
-  const filter = createFilter(
-    options.include || /\.(tsx?|jsx)$/,
-    options.exclude || /\.js$/
-  )
+const rollupToEsbuildFormatMap: Record<
+  string,
+  EsbuildTransformOptions['format'] | undefined
+> = {
+  es: 'esm',
+  cjs: 'cjs',
 
-  return {
-    name: 'vite:esbuild',
-    async transform(code, id) {
-      if (filter(id) || filter(cleanUrl(id))) {
-        const result = await transformWithEsbuild(code, id, options)
-        if (result.warnings.length) {
-          result.warnings.forEach((m) => {
-            this.warn(prettifyMessage(m, code))
-          })
-        }
-        if (options.jsxInject && /\.(?:j|t)sx\b/.test(id)) {
-          result.code = options.jsxInject + ';' + result.code
-        }
-        return {
-          code: result.code,
-          map: result.map
-        }
-      }
-    }
-  }
+  // passing `var Lib = (() => {})()` to esbuild with format = "iife"
+  // will turn it to `(() => { var Lib = (() => {})() })()`,
+  // so we remove the format config to tell esbuild not doing this
+  //
+  // although esbuild doesn't change format, there is still possibility
+  // that `{ treeShaking: true }` removes a top-level no-side-effect variable
+  // like: `var Lib = 1`, which becomes `` after esbuild transforming,
+  // but thankfully rollup does not do this optimization now
+  iife: undefined,
 }
 
-export const buildEsbuildPlugin = (config: ResolvedConfig): Plugin => {
+// #7188, esbuild adds helpers out of the UMD and IIFE wrappers, and the
+// names are minified potentially causing collision with other globals.
+// We inject the helpers inside the wrappers.
+// e.g. turn:
+//    <esbuild helpers> (function(){ /*actual content/* })()
+// into:
+//    (function(){ <esbuild helpers> /*actual content/* })()
+// Not using regex because it's too hard to rule out performance issues like #8738 #8099 #10900 #14065
+// Instead, using plain string index manipulation (indexOf, slice) which is simple and performant
+// We don't need to create a MagicString here because both the helpers and
+// the headers don't modify the sourcemap
+export const injectEsbuildHelpers = (
+  esbuildCode: string,
+  format: string,
+): string => {
+  const contentIndex =
+    format === 'iife'
+      ? Math.max(esbuildCode.search(IIFE_BEGIN_RE), 0)
+      : format === 'umd'
+        ? esbuildCode.indexOf(`(function(`) // same for minified or not
+        : 0
+
+  if (contentIndex > 0) {
+    const esbuildHelpers = esbuildCode.slice(0, contentIndex)
+    return esbuildCode
+      .slice(contentIndex)
+      .replace('"use strict";', (m: string) => m + esbuildHelpers)
+  }
+  return esbuildCode
+}
+
+export const buildEsbuildPlugin = (): Plugin => {
   return {
     name: 'vite:esbuild-transpile',
+    applyToEnvironment(environment) {
+      return environment.config.esbuild !== false
+    },
     async renderChunk(code, chunk, opts) {
-      // @ts-ignore injected by @vitejs/plugin-legacy
-      if (opts.__vite_skip_esbuild__) {
+      // avoid on legacy chunks since it produces legacy-unsafe code
+      // e.g. rewriting object properties into shorthands
+      if (this.environment.config.isOutputOptionsForLegacyChunks?.(opts)) {
         return null
       }
 
-      const target = config.build.target
-      const minify = config.build.minify === 'esbuild'
-      if ((!target || target === 'esnext') && !minify) {
+      const config = this.environment.config
+      const options = resolveEsbuildTranspileOptions(config, opts.format)
+
+      if (!options) {
         return null
       }
-      return transformWithEsbuild(code, chunk.fileName, {
-        target: target || undefined,
-        minify
-      })
+
+      const res = await transformWithEsbuild(
+        code,
+        chunk.fileName,
+        options,
+        undefined,
+        config,
+        undefined,
+        true,
+      )
+
+      if (config.build.lib) {
+        res.code = injectEsbuildHelpers(res.code, opts.format)
+      }
+
+      return res
+    },
+  }
+}
+
+export function resolveEsbuildTranspileOptions(
+  config: ResolvedConfig,
+  format: InternalModuleFormat,
+): EsbuildTransformOptions | null {
+  const target = config.build.target
+  const minify = config.build.minify === 'esbuild'
+
+  if ((!target || target === 'esnext') && !minify) {
+    return null
+  }
+
+  // Do not minify whitespace for ES lib output since that would remove
+  // pure annotations and break tree-shaking
+  // https://github.com/vuejs/core/issues/2860#issuecomment-926882793
+  const isEsLibBuild = config.build.lib && format === 'es'
+  const esbuildOptions = config.esbuild || {}
+
+  const options: EsbuildTransformOptions = {
+    ...esbuildOptions,
+    loader: 'js',
+    target: target || undefined,
+    format: rollupToEsbuildFormatMap[format],
+    supported: {
+      ...defaultEsbuildSupported,
+      ...esbuildOptions.supported,
+    },
+  }
+
+  // If no minify, disable all minify options
+  if (!minify) {
+    return {
+      ...options,
+      minify: false,
+      minifyIdentifiers: false,
+      minifySyntax: false,
+      minifyWhitespace: false,
+      treeShaking: false,
+    }
+  }
+
+  // If user enable fine-grain minify options, minify with their options instead
+  if (
+    options.minifyIdentifiers != null ||
+    options.minifySyntax != null ||
+    options.minifyWhitespace != null
+  ) {
+    if (isEsLibBuild) {
+      // Disable minify whitespace as it breaks tree-shaking
+      return {
+        ...options,
+        minify: false,
+        minifyIdentifiers: options.minifyIdentifiers ?? true,
+        minifySyntax: options.minifySyntax ?? true,
+        minifyWhitespace: false,
+        treeShaking: true,
+      }
+    } else {
+      return {
+        ...options,
+        minify: false,
+        minifyIdentifiers: options.minifyIdentifiers ?? true,
+        minifySyntax: options.minifySyntax ?? true,
+        minifyWhitespace: options.minifyWhitespace ?? true,
+        treeShaking: true,
+      }
+    }
+  }
+
+  // Else apply default minify options
+  if (isEsLibBuild) {
+    // Minify all except whitespace as it breaks tree-shaking
+    return {
+      ...options,
+      minify: false,
+      minifyIdentifiers: true,
+      minifySyntax: true,
+      minifyWhitespace: false,
+      treeShaking: true,
+    }
+  } else {
+    return {
+      ...options,
+      minify: true,
+      treeShaking: true,
     }
   }
 }
 
-function prettifyMessage(m: Message, code: string): string {
-  let res = chalk.yellow(m.text)
+function prettifyMessage(m: EsbuildMessage, code: string): string {
+  let res = colors.yellow(m.text)
   if (m.location) {
-    const lines = code.split(/\r?\n/g)
-    const line = Number(m.location.line)
-    const column = Number(m.location.column)
-    const offset =
-      lines
-        .slice(0, line - 1)
-        .map((l) => l.length)
-        .reduce((total, l) => total + l + 1, 0) + column
-    res += `\n` + generateCodeFrame(code, offset, offset + 1)
+    res += `\n` + generateCodeFrame(code, m.location)
   }
   return res + `\n`
 }
 
-// modified from <https://github.com/TypeStrong/tsconfig/blob/v7.0.0/src/tsconfig.ts#L75-L95>
+let globalTSConfigResolutionCache: TsconfigCache | undefined
+const tsconfigResolutionCacheMap = new WeakMap<ResolvedConfig, TsconfigCache>()
 
-/**
- * Copyright (c) 2015 TypeStrong
- *
- * Permission is hereby granted, free of charge, to any person obtaining a copy
- * of this software and associated documentation files (the "Software"), to deal
- * in the Software without restriction, including without limitation the rights
- * to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
- * copies of the Software, and to permit persons to whom the Software is
- * furnished to do so, subject to the following conditions:
- *
- * The above copyright notice and this permission notice shall be included in all
- * copies or substantial portions of the Software.
- *
- * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
- * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
- * AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
- * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
- * OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
- * SOFTWARE.
- */
-async function findTSConfig(dir: string): Promise<string | void> {
-  const configFile = path.resolve(dir, 'tsconfig.json')
-
-  const stats = await stat(configFile)
-  if (isFile(stats)) {
-    return configFile
+export function getTSConfigResolutionCache(
+  config?: ResolvedConfig,
+): TsconfigCache {
+  if (!config) {
+    return (globalTSConfigResolutionCache ??= new TsconfigCache())
   }
-
-  const parentDir = path.dirname(dir)
-
-  if (dir === parentDir) {
-    return
+  let cache = tsconfigResolutionCacheMap.get(config)
+  if (!cache) {
+    cache = new TsconfigCache(config.tsconfig)
+    tsconfigResolutionCacheMap.set(config, cache)
   }
-
-  return findTSConfig(parentDir)
+  return cache
 }
 
-/**
- * Check if a file exists.
- */
-function stat(filename: string): Promise<fs.Stats | void> {
-  return new Promise((resolve, reject) => {
-    fs.stat(filename, (err, stats) => {
-      return err ? resolve() : resolve(stats)
-    })
-  })
-}
+export function reloadOnTsconfigChange(
+  server: ViteDevServer,
+  changedFile: string,
+): void {
+  // any tsconfig.json that's added in the workspace could be closer to a code file than a previously cached one
+  // any json file in the tsconfig cache could have been used to compile ts
+  if (changedFile.endsWith('.json')) {
+    const cache = getTSConfigResolutionCache(server.config)
+    if (changedFile.endsWith('/tsconfig.json')) {
+      server.config.logger.info(
+        `changed tsconfig file detected: ${changedFile} - Clearing cache and forcing full-reload to ensure TypeScript is compiled with updated config values.`,
+        { clear: server.config.clearScreen, timestamp: true },
+      )
 
-/**
- * Check filesystem stat is a directory.
- */
-function isFile(stats: fs.Stats | void) {
-  return stats ? stats.isFile() || stats.isFIFO() : false
-}
+      // TODO: more finegrained invalidation than the nuclear option below
 
-// from <https://github.com/TypeStrong/tsconfig/pull/31>
-// by @dominikg
-
-/**
- * replace dangling commas from pseudo-json string with single space
- *
- * limitations:
- * - pseudo-json must not contain comments, use strip-json-comments before
- * - only a single dangling comma before } or ] is removed
- *   stripDanglingComma('[1,2,]') === '[1,2 ]
- *   stripDanglingComma('[1,2,,]') === '[1,2, ]
- *
- * implementation heavily inspired by strip-json-comments
- */
-function stripDanglingComma(jsonString: string) {
-  /**
-   * Check if char at qoutePosition is escaped by an odd number of backslashes preceding it
-   */
-  function isEscaped(jsonString: string, quotePosition: number) {
-    let index = quotePosition - 1
-    let backslashCount = 0
-
-    while (jsonString[index] === '\\') {
-      index -= 1
-      backslashCount += 1
-    }
-
-    return backslashCount % 2 === 1
-  }
-
-  let insideString = false
-  let offset = 0
-  let result = ''
-  let danglingCommaPos = null
-  for (let i = 0; i < jsonString.length; i++) {
-    const currentCharacter = jsonString[i]
-
-    if (currentCharacter === '"') {
-      const escaped = isEscaped(jsonString, i)
-      if (!escaped) {
-        insideString = !insideString
+      // clear module graph to remove code compiled with outdated config
+      for (const environment of Object.values(server.environments)) {
+        environment.moduleGraph.invalidateAll()
       }
-    }
 
-    if (insideString) {
-      danglingCommaPos = null
-      continue
-    }
-    if (currentCharacter === ',') {
-      danglingCommaPos = i
-      continue
-    }
-    if (danglingCommaPos) {
-      if (currentCharacter === '}' || currentCharacter === ']') {
-        result += jsonString.slice(offset, danglingCommaPos) + ' '
-        offset = danglingCommaPos + 1
-        danglingCommaPos = null
-      } else if (!currentCharacter.match(/\s/)) {
-        danglingCommaPos = null
+      // reset the cache so that recompile works with up2date configs
+      cache.clear()
+
+      // reload environments
+      for (const environment of Object.values(server.environments)) {
+        environment.hot.send({
+          type: 'full-reload',
+          path: '*',
+        })
       }
     }
   }
-
-  return result + jsonString.substring(offset)
-}
-
-async function readTSConfig(configPath: string): Promise<TSConfigJSON> {
-  const content: string = await new Promise((resolve, reject) => {
-    fs.readFile(configPath, 'utf-8', (err, data) => {
-      if (err) {
-        reject(err)
-        return
-      }
-      resolve(stripComments(stripBom(data)))
-    })
-  })
-
-  // tsconfig.json can be empty
-  if (/^\s*$/.test(content)) {
-    return {}
-  }
-
-  return JSON.parse(stripDanglingComma(content)) as TSConfigJSON
-}
-
-const tsconfigCache = new Map<string, TSConfigJSON>()
-async function loadTsconfigJsonForFile(
-  filename: string
-): Promise<TSConfigJSON> {
-  const directory = path.dirname(filename)
-
-  const cached = tsconfigCache.get(directory)
-  if (cached) {
-    return cached
-  }
-
-  let configPath = await findTSConfig(directory)
-  let tsconfig: TSConfigJSON = {}
-
-  if (configPath) {
-    const visited = new Set()
-    visited.add(configPath)
-
-    tsconfig = await readTSConfig(configPath)
-    while (tsconfig.extends) {
-      const configRequire = createRequire(configPath)
-
-      const extendsPath = configRequire.resolve(tsconfig.extends)
-      const extendedConfig = await readTSConfig(extendsPath)
-
-      if (visited.has(extendsPath)) {
-        throw new Error(
-          `Circular dependency detected in the "extends" field of ${configPath}`
-        )
-      }
-      visited.add(extendsPath)
-
-      tsconfig = {
-        extends: extendedConfig.extends,
-        compilerOptions: {
-          ...extendedConfig.compilerOptions,
-          ...tsconfig.compilerOptions
-        }
-      }
-      configPath = extendsPath
-    }
-  }
-
-  tsconfigCache.set(directory, tsconfig)
-  return tsconfig
 }

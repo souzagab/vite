@@ -1,0 +1,73 @@
+import { resolve } from 'node:path'
+import { describe, expect, it } from 'vitest'
+import { isWindows } from '../../../../shared/utils'
+import { transformDynamicImport } from '../../../plugins/dynamicImportVars'
+import { normalizePath } from '../../../utils'
+
+const dirname = import.meta.dirname
+
+async function run(input: string) {
+  const { glob, rawPattern } =
+    (await transformDynamicImport(
+      input,
+      normalizePath(resolve(dirname, 'index.js')),
+      (id) =>
+        id
+          .replace('@', resolve(dirname, './mods/'))
+          .replace('#', resolve(dirname, '../../')),
+      dirname,
+    )) || {}
+  return `__variableDynamicImportRuntimeHelper(${glob}, \`${rawPattern}\`)`
+}
+
+describe('parse positives', () => {
+  it('basic', async () => {
+    expect(await run('`./mods/${base}.js`')).toMatchSnapshot()
+  })
+
+  it('alias path', async () => {
+    expect(await run('`@/${base}.js`')).toMatchSnapshot()
+  })
+
+  it('alias path with multi ../', async () => {
+    expect(await run('`#/${base}.js`')).toMatchSnapshot()
+  })
+
+  it('with query', async () => {
+    expect(await run('`./mods/${base}.js?foo=bar`')).toMatchSnapshot()
+  })
+
+  it('with query raw', async () => {
+    expect(await run('`./mods/${base}.js?raw`')).toMatchSnapshot()
+  })
+
+  it('with query url', async () => {
+    expect(await run('`./mods/${base}.js?url`')).toMatchSnapshot()
+  })
+
+  it('? in variables', async () => {
+    expect(await run('`./mods/${base ?? foo}.js?raw`')).toMatchSnapshot()
+  })
+
+  // ? is not escaped on windows (? cannot be used as a filename on windows)
+  it.skipIf(isWindows)('? in url', async () => {
+    // oxlint-disable-next-line vitest/prefer-snapshot-hint -- https://github.com/oxc-project/oxc/issues/29183
+    expect(await run('`./mo?ds/${base ?? foo}.js?url`')).toMatchSnapshot()
+  })
+
+  // ? is not escaped on windows (? cannot be used as a filename on windows)
+  it.skipIf(isWindows)('? in worker', async () => {
+    // oxlint-disable-next-line vitest/prefer-snapshot-hint -- https://github.com/oxc-project/oxc/issues/29183
+    expect(await run('`./mo?ds/${base ?? foo}.js?worker`')).toMatchSnapshot()
+  })
+
+  it('with ../ and itself', async () => {
+    expect(await run('`../dynamicImportVar/${name}.js`')).toMatchSnapshot()
+  })
+
+  it('with multi ../ and itself', async () => {
+    expect(
+      await run('`../../plugins/dynamicImportVar/${name}.js`'),
+    ).toMatchSnapshot()
+  })
+})
